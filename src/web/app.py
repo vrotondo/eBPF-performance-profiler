@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-eBPF Performance Profiler - Web Dashboard
+eBPF Performance Profiler - Web Dashboard (DEBUG VERSION)
 Flask application with real-time metrics via WebSocket
 """
 
@@ -11,6 +11,11 @@ import os
 import sys
 import threading
 import time
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # Add parent directories to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -24,7 +29,9 @@ from collector.metrics_collector import MetricsCollector, PeriodicSnapshotter
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'ebpf-profiler-secret-key'
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Use threading mode instead of eventlet (better compatibility)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', logger=True, engineio_logger=True)
 
 # Global state
 collector = MetricsCollector(max_history=60)
@@ -45,7 +52,7 @@ class WebProfiler:
     
     def load_and_attach(self):
         """Load and attach eBPF programs"""
-        print("[*] Loading eBPF program...")
+        logger.info("[*] Loading eBPF program...")
         
         # Get path to BPF C file
         ebpf_dir = os.path.join(os.path.dirname(__file__), '..', 'ebpf')
@@ -56,7 +63,7 @@ class WebProfiler:
         
         # Load BPF program
         self.bpf = BPF(src_file=bpf_file)
-        print("[✓] eBPF program loaded")
+        logger.info("[✓] eBPF program loaded")
         
         # Attach CPU profiler
         self.bpf.attach_perf_event(
@@ -67,7 +74,7 @@ class WebProfiler:
             sample_freq=self.sample_freq,
             pid=-1  # All processes
         )
-        print(f"[✓] CPU profiler attached ({self.sample_freq} Hz)")
+        logger.info(f"[✓] CPU profiler attached ({self.sample_freq} Hz)")
         
         # Attach I/O tracers
         try:
@@ -75,44 +82,53 @@ class WebProfiler:
             self.bpf.attach_kretprobe(event="__x64_sys_read", fn_name="trace_read_return")
             self.bpf.attach_kprobe(event="__x64_sys_write", fn_name="trace_write_entry")
             self.bpf.attach_kretprobe(event="__x64_sys_write", fn_name="trace_write_return")
-            print("[✓] I/O tracers attached")
+            logger.info("[✓] I/O tracers attached")
         except Exception as e:
-            print(f"[!] Warning: Could not attach I/O tracers: {e}")
+            logger.warning(f"[!] Warning: Could not attach I/O tracers: {e}")
         
-        print("[✓] All eBPF programs attached successfully")
+        logger.info("[✓] All eBPF programs attached successfully")
     
     def handle_cpu_sample(self, cpu, data, size):
         """Handle CPU sample events"""
-        event = self.bpf["events"].event(data)
-        comm = event.comm.decode('utf-8', 'replace')
-        self.collector.add_cpu_sample(event.pid, comm, event.timestamp)
+        try:
+            event = self.bpf["events"].event(data)
+            comm = event.comm.decode('utf-8', 'replace')
+            self.collector.add_cpu_sample(event.pid, comm, event.timestamp)
+        except Exception as e:
+            logger.error(f"Error handling CPU sample: {e}")
     
     def handle_syscall_event(self, cpu, data, size):
         """Handle syscall events"""
-        event = self.bpf["syscall_events"].event(data)
-        comm = event.comm.decode('utf-8', 'replace')
-        self.collector.add_syscall_event(
-            event.pid, 
-            comm, 
-            event.syscall_id, 
-            event.duration_ns
-        )
+        try:
+            event = self.bpf["syscall_events"].event(data)
+            comm = event.comm.decode('utf-8', 'replace')
+            self.collector.add_syscall_event(
+                event.pid, 
+                comm, 
+                event.syscall_id, 
+                event.duration_ns
+            )
+        except Exception as e:
+            logger.error(f"Error handling syscall event: {e}")
     
     def handle_io_event(self, cpu, data, size):
         """Handle I/O events"""
-        event = self.bpf["io_events"].event(data)
-        comm = event.comm.decode('utf-8', 'replace')
-        self.collector.add_io_event(
-            event.pid,
-            comm,
-            event.bytes,
-            event.operation,
-            event.duration_ns
-        )
+        try:
+            event = self.bpf["io_events"].event(data)
+            comm = event.comm.decode('utf-8', 'replace')
+            self.collector.add_io_event(
+                event.pid,
+                comm,
+                event.bytes,
+                event.operation,
+                event.duration_ns
+            )
+        except Exception as e:
+            logger.error(f"Error handling I/O event: {e}")
     
     def start_polling(self):
         """Start collecting events"""
-        print("[*] Starting event collection...")
+        logger.info("[*] Starting event collection...")
         
         # Open perf buffers
         self.bpf["events"].open_perf_buffer(self.handle_cpu_sample)
@@ -120,15 +136,19 @@ class WebProfiler:
         self.bpf["io_events"].open_perf_buffer(self.handle_io_event)
         
         self.running = True
+        event_count = 0
         
         # Poll for events
         while self.running:
             try:
                 self.bpf.perf_buffer_poll(timeout=100)
+                event_count += 1
+                if event_count % 100 == 0:
+                    logger.debug(f"Polled {event_count} times, collected {self.collector.total_samples} samples")
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                print(f"[!] Error during polling: {e}")
+                logger.error(f"Error during polling: {e}")
                 break
     
     def stop(self):
@@ -148,6 +168,7 @@ class WebProfiler:
 @app.route('/')
 def index():
     """Serve the main dashboard"""
+    logger.info("Dashboard page requested")
     return render_template('index.html')
 
 
@@ -193,7 +214,9 @@ def api_syscalls():
 @app.route('/api/all')
 def api_all():
     """Get all metrics at once"""
-    return jsonify(collector.to_json())
+    data = collector.to_json()
+    logger.debug(f"API /all returning {len(data.get('top_cpu', []))} CPU processes")
+    return jsonify(data)
 
 
 # ============================================================================
@@ -203,29 +226,46 @@ def api_all():
 @socketio.on('connect')
 def handle_connect():
     """Client connected"""
-    print('[*] Client connected')
+    logger.info('[*] Client connected via WebSocket')
     emit('status', {'running': profiler_running})
+    
+    # Send initial data immediately
+    if profiler_running:
+        data = collector.to_json()
+        logger.info(f"[*] Sending initial data: {len(data.get('top_cpu', []))} processes")
+        emit('metrics_update', data)
 
 
 @socketio.on('disconnect')
 def handle_disconnect():
     """Client disconnected"""
-    print('[*] Client disconnected')
+    logger.info('[*] Client disconnected')
 
 
 @socketio.on('request_update')
 def handle_request_update():
     """Client requested data update"""
+    logger.debug("Client requested update")
     if profiler_running:
-        emit('metrics_update', collector.to_json())
+        data = collector.to_json()
+        logger.debug(f"Sending update: {len(data.get('top_cpu', []))} processes, {collector.total_samples} total samples")
+        emit('metrics_update', data)
+    else:
+        logger.warning("Update requested but profiler not running")
 
 
 def broadcast_metrics():
     """Background task to broadcast metrics to all clients"""
+    logger.info("[*] Starting metrics broadcaster")
     while True:
-        time.sleep(1)  # Update every second
-        if profiler_running:
-            socketio.emit('metrics_update', collector.to_json())
+        try:
+            time.sleep(1)  # Update every second
+            if profiler_running:
+                data = collector.to_json()
+                logger.debug(f"Broadcasting: {collector.total_samples} samples, {len(data.get('top_cpu', []))} processes")
+                socketio.emit('metrics_update', data)
+        except Exception as e:
+            logger.error(f"Error broadcasting metrics: {e}")
 
 
 # ============================================================================
@@ -249,16 +289,18 @@ def start_profiler():
         # Start snapshotter
         snapshotter = PeriodicSnapshotter(collector, interval=1.0)
         snapshotter.start()
+        logger.info("[*] Snapshotter started")
         
         # Start profiler in background thread
         profiler_thread = threading.Thread(target=profiler.start_polling, daemon=True)
         profiler_thread.start()
+        logger.info("[*] Profiler thread started")
         
         profiler_running = True
-        print("[✓] Profiler started successfully")
+        logger.info("[✓] Profiler started successfully")
         
     except Exception as e:
-        print(f"[✗] Failed to start profiler: {e}")
+        logger.error(f"[✗] Failed to start profiler: {e}")
         import traceback
         traceback.print_exc()
 
@@ -278,7 +320,7 @@ def stop_profiler():
     if snapshotter:
         snapshotter.stop()
     
-    print("[✓] Profiler stopped")
+    logger.info("[✓] Profiler stopped")
 
 
 # ============================================================================
@@ -302,7 +344,7 @@ def main():
         sys.exit(1)
     
     print("="*80)
-    print("eBPF Performance Profiler - Web Dashboard")
+    print("eBPF Performance Profiler - Web Dashboard (DEBUG MODE)")
     print("="*80)
     print(f"\n[*] Starting web server on {args.host}:{args.port}")
     print(f"[*] Dashboard URL: http://localhost:{args.port}")
@@ -310,6 +352,11 @@ def main():
     
     # Start profiler
     start_profiler()
+    
+    # Give profiler time to collect initial data
+    logger.info("[*] Waiting 3 seconds for initial data collection...")
+    time.sleep(3)
+    logger.info(f"[*] Collected {collector.total_samples} initial samples")
     
     # Start metrics broadcaster
     broadcast_thread = threading.Thread(target=broadcast_metrics, daemon=True)
@@ -322,7 +369,8 @@ def main():
             host=args.host,
             port=args.port,
             debug=args.debug,
-            use_reloader=False  # Disable reloader to avoid double profiler start
+            use_reloader=False,  # Disable reloader to avoid double profiler start
+            allow_unsafe_werkzeug=True  # For development
         )
     except KeyboardInterrupt:
         print("\n[*] Shutting down...")
