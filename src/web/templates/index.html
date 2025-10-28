@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>eBPF Performance Profiler</title>
+
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+    <!-- Socket.IO -->
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        .container-fluid {
+            max-width: 1600px;
+        }
+
+        .header {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 25px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+
+        .header h1 {
+            margin: 0;
+            color: #667eea;
+            font-weight: 700;
+        }
+
+        .header .subtitle {
+            color: #666;
+            margin: 5px 0 0 0;
+        }
+
+        .status-badge {
+            position: absolute;
+            top: 25px;
+            right: 25px;
+        }
+
+        .stat-card {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+            transition: transform 0.2s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
+        }
+
+        .stat-icon {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #667eea;
+        }
+
+        .stat-label {
+            color: #666;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .chart-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 25px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .chart-card h3 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-weight: 600;
+        }
+
+        .table-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 25px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .table-card h3 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-weight: 600;
+        }
+
+        .table {
+            margin: 0;
+        }
+
+        .table thead th {
+            background: #f8f9fa;
+            border-bottom: 2px solid #667eea;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .badge-cpu {
+            background: #667eea;
+        }
+
+        .badge-io {
+            background: #f093fb;
+        }
+
+        .badge-syscall {
+            background: #4facfe;
+        }
+
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 300px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container-fluid">
+        <!-- Header -->
+        <div class="header position-relative">
+            <div class="row align-items-center">
+                <div class="col">
+                    <h1><i class="fas fa-chart-line"></i> eBPF Performance Profiler</h1>
+                    <p class="subtitle">Real-time system performance monitoring with eBPF</p>
+                </div>
+                <div class="col-auto">
+                    <span class="badge bg-success status-badge pulse" id="status-badge">
+                        <i class="fas fa-circle"></i> LIVE
+                    </span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Summary Stats -->
+        <div class="row">
+            <div class="col-md-3">
+                <div class="stat-card text-center">
+                    <div class="stat-icon text-primary">
+                        <i class="fas fa-microchip"></i>
+                    </div>
+                    <div class="stat-value" id="stat-cpu-samples">0</div>
+                    <div class="stat-label">CPU Samples</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card text-center">
+                    <div class="stat-icon text-info">
+                        <i class="fas fa-hdd"></i>
+                    </div>
+                    <div class="stat-value" id="stat-io-mb">0</div>
+                    <div class="stat-label">I/O (MB)</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card text-center">
+                    <div class="stat-icon text-warning">
+                        <i class="fas fa-cogs"></i>
+                    </div>
+                    <div class="stat-value" id="stat-syscalls">0</div>
+                    <div class="stat-label">Syscalls</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card text-center">
+                    <div class="stat-icon text-success">
+                        <i class="fas fa-clock"></i>
+                    </div>
+                    <div class="stat-value" id="stat-uptime">0s</div>
+                    <div class="stat-label">Uptime</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts Row -->
+        <div class="row">
+            <div class="col-lg-6">
+                <div class="chart-card">
+                    <h3><i class="fas fa-microchip"></i> CPU Usage</h3>
+                    <div class="chart-container">
+                        <canvas id="cpuChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="chart-card">
+                    <h3><i class="fas fa-hdd"></i> I/O Operations</h3>
+                    <div class="chart-container">
+                        <canvas id="ioChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tables Row -->
+        <div class="row">
+            <div class="col-lg-6">
+                <div class="table-card">
+                    <h3><i class="fas fa-list"></i> Top CPU Processes</h3>
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>PID</th>
+                                    <th>Process</th>
+                                    <th>CPU %</th>
+                                    <th>Samples</th>
+                                </tr>
+                            </thead>
+                            <tbody id="cpu-table-body">
+                                <tr>
+                                    <td colspan="4" class="loading">
+                                        <i class="fas fa-spinner fa-spin"></i> Loading...
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg-6">
+                <div class="table-card">
+                    <h3><i class="fas fa-exchange-alt"></i> Top I/O Processes</h3>
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>PID</th>
+                                    <th>Process</th>
+                                    <th>Read (MB)</th>
+                                    <th>Write (MB)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="io-table-body">
+                                <tr>
+                                    <td colspan="4" class="loading">
+                                        <i class="fas fa-spinner fa-spin"></i> Loading...
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="col-12">
+                <div class="table-card">
+                    <h3><i class="fas fa-cogs"></i> Top System Calls</h3>
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>PID</th>
+                                    <th>Process</th>
+                                    <th>Syscall ID</th>
+                                    <th>Count</th>
+                                    <th>Avg Duration (μs)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="syscall-table-body">
+                                <tr>
+                                    <td colspan="5" class="loading">
+                                        <i class="fas fa-spinner fa-spin"></i> Loading...
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <!-- Dashboard JavaScript -->
+    <script>
+        // Initialize Socket.IO
+        const socket = io();
+
+        // Chart.js instances
+        let cpuChart = null;
+        let ioChart = null;
+
+        // Initialize charts
+        function initCharts() {
+            // CPU Chart
+            const cpuCtx = document.getElementById('cpuChart').getContext('2d');
+            cpuChart = new Chart(cpuCtx, {
+                type: 'bar',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'CPU Usage (%)',
+                        data: [],
+                        backgroundColor: 'rgba(102, 126, 234, 0.6)',
+                        borderColor: 'rgba(102, 126, 234, 1)',
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 100
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    }
+                }
+            });
+
+            // I/O Chart
+            const ioCtx = document.getElementById('ioChart').getContext('2d');
+            ioChart = new Chart(ioCtx, {
+                type: 'bar',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: 'Read (MB)',
+                            data: [],
+                            backgroundColor: 'rgba(79, 172, 254, 0.6)',
+                            borderColor: 'rgba(79, 172, 254, 1)',
+                            borderWidth: 2
+                        },
+                        {
+                            label: 'Write (MB)',
+                            data: [],
+                            backgroundColor: 'rgba(240, 147, 251, 0.6)',
+                            borderColor: 'rgba(240, 147, 251, 1)',
+                            borderWidth: 2
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        }
+
+        // Update dashboard with new data
+        function updateDashboard(data) {
+            // Update summary stats
+            if (data.summary) {
+                document.getElementById('stat-cpu-samples').textContent =
+                    data.summary.total_cpu_samples.toLocaleString();
+                document.getElementById('stat-io-mb').textContent =
+                    data.summary.total_io_mb.toFixed(1);
+                document.getElementById('stat-syscalls').textContent =
+                    data.summary.total_syscalls.toLocaleString();
+                document.getElementById('stat-uptime').textContent =
+                    data.summary.uptime_seconds.toFixed(0) + 's';
+            }
+
+            // Update CPU chart
+            if (data.top_cpu && data.top_cpu.length > 0) {
+                const top5 = data.top_cpu.slice(0, 5);
+                cpuChart.data.labels = top5.map(p => `${p.name} (${p.pid})`);
+                cpuChart.data.datasets[0].data = top5.map(p => p.cpu_percent);
+                cpuChart.update('none');
+            }
+
+            // Update I/O chart
+            if (data.top_io && data.top_io.length > 0) {
+                const top5 = data.top_io.slice(0, 5);
+                ioChart.data.labels = top5.map(p => `${p.name} (${p.pid})`);
+                ioChart.data.datasets[0].data = top5.map(p => p.read_mb);
+                ioChart.data.datasets[1].data = top5.map(p => p.write_mb);
+                ioChart.update('none');
+            }
+
+            // Update CPU table
+            if (data.top_cpu) {
+                const tbody = document.getElementById('cpu-table-body');
+                tbody.innerHTML = '';
+                data.top_cpu.slice(0, 10).forEach(proc => {
+                    const row = `
+                        <tr>
+                            <td><code>${proc.pid}</code></td>
+                            <td><strong>${proc.name}</strong></td>
+                            <td><span class="badge badge-cpu">${proc.cpu_percent.toFixed(2)}%</span></td>
+                            <td>${proc.samples}</td>
+                        </tr>
+                    `;
+                    tbody.innerHTML += row;
+                });
+            }
+
+            // Update I/O table
+            if (data.top_io) {
+                const tbody = document.getElementById('io-table-body');
+                tbody.innerHTML = '';
+                data.top_io.slice(0, 10).forEach(proc => {
+                    const row = `
+                        <tr>
+                            <td><code>${proc.pid}</code></td>
+                            <td><strong>${proc.name}</strong></td>
+                            <td>${proc.read_mb.toFixed(2)}</td>
+                            <td>${proc.write_mb.toFixed(2)}</td>
+                        </tr>
+                    `;
+                    tbody.innerHTML += row;
+                });
+            }
+
+            // Update Syscall table
+            if (data.top_syscalls) {
+                const tbody = document.getElementById('syscall-table-body');
+                tbody.innerHTML = '';
+                data.top_syscalls.slice(0, 10).forEach(sc => {
+                    const row = `
+                        <tr>
+                            <td><code>${sc.pid}</code></td>
+                            <td><strong>${sc.name}</strong></td>
+                            <td><span class="badge badge-syscall">${sc.syscall_id}</span></td>
+                            <td>${sc.count.toLocaleString()}</td>
+                            <td>${sc.avg_duration_us.toFixed(2)}</td>
+                        </tr>
+                    `;
+                    tbody.innerHTML += row;
+                });
+            }
+        }
+
+        // Socket.IO event handlers
+        socket.on('connect', () => {
+            console.log('Connected to server');
+            document.getElementById('status-badge').classList.remove('bg-danger');
+            document.getElementById('status-badge').classList.add('bg-success');
+        });
+
+        socket.on('disconnect', () => {
+            console.log('Disconnected from server');
+            document.getElementById('status-badge').classList.remove('bg-success');
+            document.getElementById('status-badge').classList.add('bg-danger');
+        });
+
+        socket.on('metrics_update', (data) => {
+            updateDashboard(data);
+        });
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            initCharts();
+
+            // Request initial data
+            socket.emit('request_update');
+        });
+    </script>
+</body>
+
+</html>
